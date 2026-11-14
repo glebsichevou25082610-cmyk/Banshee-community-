@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Общий браузер</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #111; color: #eee; font: 14px system-ui, sans-serif; }
+  #bar { display: flex; gap: 6px; padding: 6px; background: #222; align-items: center; }
+  #bar button { background: #333; color: #eee; border: 0; border-radius: 6px; padding: 8px 10px; cursor: pointer; }
+  #bar button:hover { background: #444; }
+  #url { flex: 1; min-width: 0; padding: 8px 10px; border-radius: 6px; border: 0; background: #333; color: #eee; }
+  #info { font-size: 12px; opacity: .7; white-space: nowrap; }
+  #wrap { width: 100%; }
+  canvas { display: block; width: 100%; height: auto; background: #000; outline: none; cursor: default; }
+  #status { padding: 6px 10px; font-size: 12px; opacity: .7; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <button id="back">←</button>
+  <button id="fwd">→</button>
+  <button id="reload">⟳</button>
+  <input id="url" placeholder="Адрес или поисковый запрос" autocomplete="off">
+  <span id="info"></span>
+</div>
+<div id="wrap"><canvas id="c" tabindex="0" width="1280" height="720"></canvas></div>
+<div id="status">Подключение…</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const urlInput = document.getElementById('url');
+const status = document.getElementById('status');
+const info = document.getElementById('info');
+let ws, W = 1280, H = 720, canControl = false, viewers = 1;
+
+function setStatus() {
+  status.textContent = canControl ? 'Вы можете управлять браузером' : 'Режим просмотра';
+  info.textContent = '👥 ' + viewers;
+}
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => (status.textContent = 'Подключено');
+  ws.onclose = () => { status.textContent = 'Соединение потеряно, переподключаюсь…'; setTimeout(connect, 1500); };
+  ws.onmessage = async (e) => {
+    if (typeof e.data !== 'string') {
+      const bmp = await createImageBitmap(new Blob([e.data], { type: 'image/jpeg' }));
+      ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+      bmp.close();
+      return;
+    }
+    const m = JSON.parse(e.data);
+    if (m.t === 'hello') {
+      W = m.w; H = m.h; canvas.width = W; canvas.height = H;
+      canControl = m.canControl;
+      if (m.needsToken && !canControl) {
+        const token = sessionStorage.getItem('token') || prompt('Пароль для управления (Отмена — только смотреть):');
+        if (token) { sessionStorage.setItem('token', token); ws.send(JSON.stringify({ t: 'auth', token })); }
+      }
+      if (document.activeElement !== urlInput) urlInput.value = m.url || '';
+      setStatus();
+    } else if (m.t === 'auth') {
+      canControl = m.ok;
+      if (!m.ok) sessionStorage.removeItem('token');
+      setStatus();
+    } else if (m.t === 'state') {
+      if (document.activeElement !== urlInput) urlInput.value = m.url;
+      document.title = m.title ? m.title + ' — Общий браузер' : 'Общий браузер';
+    } else if (m.t === 'viewers') {
+      viewers = m.n; setStatus();
+    }
+  };
+}
+connect();
+
+const send = (o) => ws && ws.readyState === 1 && ws.send(JSON.stringify(o));
+function pos(e) {
+  const r = canvas.getBoundingClientRect();
+  return { x: ((e.clientX - r.left) / r.width) * W, y: ((e.clientY - r.top) / r.height) * H };
+}
+
+canvas.addEventListener('click', (e) => { canvas.focus(); send({ t: 'click', ...pos(e) }); });
+canvas.addEventListener('contextmenu', (e) => { e.preventDefault(); send({ t: 'click', button: 2, ...pos(e) }); });
+let lastMove = 0;
+canvas.addEventListener('mousemove', (e) => {
+  const now = Date.now();
+  if (now - lastMove > 80) { lastMove = now; send({ t: 'move', ...pos(e) }); }
+});
+canvas.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  send({ t: 'wheel', dx: e.deltaX, dy: e.deltaY });
+}, { passive: false });
+
+canvas.addEventListener('keydown', (e) => {
+  if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt' || e.key === 'Meta') return;
+  e.preventDefault();
+  if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    send({ t: 'text', text: e.key });
+  } else {
+    const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.metaKey && 'Meta', e.shiftKey && 'Shift'].filter(Boolean);
+    send({ t: 'key', key: [...mods, e.key.length === 1 ? e.key.toUpperCase() : e.key].join('+') });
+  }
+});
+
+urlInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { send({ t: 'goto', url: urlInput.value }); urlInput.blur(); canvas.focus(); }
+});
+document.getElementById('back').onclick = () => send({ t: 'back' });
+document.getElementById('fwd').onclick = () => send({ t: 'forward' });
+document.getElementById('reload').onclick = () => send({ t: 'reload' });
+</script>
+</body>
+</html>
